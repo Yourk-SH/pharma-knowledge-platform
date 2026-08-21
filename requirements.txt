@@ -1,0 +1,17 @@
+langchain
+langchain-core
+langchain-community
+langchain-openai
+langchain-text-splitters
+langchain-chroma
+langgraph
+chromadb
+rank-bm25
+jieba
+numpy
+fastapi
+uvicorn
+streamlit
+pymupdf
+python-dotenv
+pytest
