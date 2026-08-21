@@ -27,11 +27,12 @@ from logger import logger, set_request_id
 
 BADCASE_PATH = BASE_DIR / "logs" / "badcases.jsonl"
 
-
+from cache import cache_lookup, cache_writeback, warmup_cache
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     parents, children, _ = load_index()
     logger.info(f"知识库就绪：{len(parents)} 个父块 / {len(children)} 个子块")
+    warmup_cache()
     yield
 
 

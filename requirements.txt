@@ -19,3 +19,4 @@ pymysql
 redis
 loguru
 requests
+httpx

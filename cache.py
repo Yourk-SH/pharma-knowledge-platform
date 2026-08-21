@@ -1,4 +1,4 @@
-"""三级缓存：L1 Redis 热缓存 → L2 MySQL FAQ 库（相似度≥0.85）→ 未命中走 RAG"""
+"""三级缓存：L1 Redis 热缓存 → L2 MySQL FAQ 库（相似度≥0.85）→ 未命中走 RAG（v2：懒加载，可测试）"""
 import hashlib
 import json
 import time
@@ -147,22 +147,43 @@ class FAQStore:
         return None, best
 
 
-redis_layer = RedisLayer()
-faq_store = FAQStore()
+# ===== 懒加载单例：导入不再触发 MySQL/embedding 调用，单元测试可安全 import =====
+_redis_layer = None
+_faq_store = None
+
+
+def get_redis_layer() -> RedisLayer:
+    global _redis_layer
+    if _redis_layer is None:
+        _redis_layer = RedisLayer()
+    return _redis_layer
+
+
+def get_faq_store() -> FAQStore:
+    global _faq_store
+    if _faq_store is None:
+        _faq_store = FAQStore()
+    return _faq_store
+
+
+def warmup_cache():
+    """服务启动时主动预热（保持原有的启动日志时机）"""
+    get_redis_layer()
+    get_faq_store()
 
 
 def cache_lookup(question: str):
     """三级查询：命中返回 (答案, 来源标识)，未命中返回 (None, None)"""
-    hit = redis_layer.get(question)
+    hit = get_redis_layer().get(question)
     if hit:
         return hit["answer"], "redis"
-    answer, sim = faq_store.match(question)
+    answer, sim = get_faq_store().match(question)
     if answer:
-        redis_layer.set(question, answer)
+        get_redis_layer().set(question, answer)
         return answer, f"faq:{sim:.4f}"
     return None, None
 
 
 def cache_writeback(question: str, answer: str):
     """RAG 回答回写 L1：近期重复问题直接复用"""
-    redis_layer.set(question, answer)
+    get_redis_layer().set(question, answer)
