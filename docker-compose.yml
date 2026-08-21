@@ -12,6 +12,7 @@ services:
     env_file: .env
     environment:
       - HOST=0.0.0.0
+      - TZ=Asia/Shanghai
       - REDIS_URL=redis://redis:6379/0
       - MYSQL_HOST=host.docker.internal
     volumes:
@@ -27,5 +28,6 @@ services:
       - "8501:8501"
     environment:
       - API_BASE=http://api:8000
+      - TZ=Asia/Shanghai
     depends_on:
       - api

@@ -1,4 +1,4 @@
-"""Agent 编排模块：LangGraph 五节点流水线（v3：全链路追踪）"""
+"""Agent 编排模块：LangGraph 五节点流水线（v5：多轮上下文 + 真 token 流式）"""
 import time
 from typing import TypedDict, List, Dict
 
@@ -38,6 +38,7 @@ def get_retriever() -> HybridRetriever:
 
 class AgentState(TypedDict):
     question: str
+    history: List[Dict]
     search_query: str
     retrieved: List[Dict]
     draft: str
@@ -61,11 +62,41 @@ def timed(node_name: str):
 
 @timed("rewrite")
 def rewrite_query(state: AgentState):
-    resp = get_llm().invoke(
-        f"把用户问题改写成适合检索医药知识库的关键词短句，只输出改写结果：{state['question']}"
-    )
-    logger.debug(f"[rewrite] 结果: {resp.content}")
-    return {"search_query": resp.content}
+    """查询改写：携带最近对话历史，把省略式追问补全成独立完整的问题"""
+    if state.get("search_query"):
+        logger.debug("[rewrite] search_query 已预置，跳过重复改写")
+        return {"search_query": state["search_query"]}
+
+    history = state.get("history") or []
+    if history:
+        hist_text = "\n".join(
+            f"{'用户' if h.get('role') == 'user' else '助手'}：{h.get('content', '')[:200]}"
+            for h in history[-6:]
+        )
+        prompt = (
+            "你是查询改写器。以下是最近的对话历史：\n"
+            f"{hist_text}\n\n"
+            f"用户最新问题：{state['question']}\n\n"
+            "改写规则：\n"
+            "1. 如果最新问题省略了指代（如'那XX呢'、'它的禁忌'），补全成独立完整的问题；\n"
+            "2. 代词（它/这个/那个）优先继承【最近一轮】讨论的主体（通常是最近提到的药品名），"
+            "而不是更早轮次的主体；\n"
+            "3. 如果问题本身已经完整，原样保留。\n\n"
+            "示例：\n"
+            "历史：用户：阿司匹林的主要成分有哪些？\n"
+            "最新问题：阿莫西林呢？ → 输出：阿莫西林的主要成分有哪些？\n"
+            "历史：用户：阿莫西林的主要成分有哪些？\n"
+            "最新问题：它的适应症有哪些？ → 输出：阿莫西林的适应症有哪些？\n\n"
+            "只输出一句改写后的问题，不要解释："
+        )
+    else:
+        prompt = f"把用户问题改写成适合检索医药知识库的关键词短句，只输出改写结果：{state['question']}"
+    resp = get_llm().invoke(prompt)
+    search_query = resp.content.strip().strip('"').strip()
+    if not search_query:
+        search_query = state["question"]
+    logger.info(f"[rewrite] {state['question']} → {search_query}")
+    return {"search_query": search_query}
 
 
 @timed("retrieve")
@@ -88,16 +119,28 @@ def reject(state: AgentState):
     return {"final_answer": "知识库中未检索到足够相关的信息，无法回答，请核实后重新提问。（合规要求：宁缺毋错）"}
 
 
-@timed("generate")
-def generate(state: AgentState):
+def build_generate_prompt(state: AgentState) -> str:
+    """生成提示词构造：generate 与 stream_generate 共用，保证两条路径行为一致"""
     ctx = "\n".join(
         f"[{i+1}] {r['content']}" for i, r in enumerate(state["retrieved"])
     )
-    resp = get_llm().invoke(
+    return (
         f"仅根据以下资料回答问题，必须用[n]标注引用来源，资料没有的信息回答'不知道'。\n"
         f"资料：\n{ctx}\n\n问题：{state['question']}"
     )
+
+
+@timed("generate")
+def generate(state: AgentState):
+    resp = get_llm().invoke(build_generate_prompt(state))
     return {"draft": resp.content}
+
+
+def stream_generate(state: AgentState):
+    """流式生成：逐 token 产出文本片段，调用方自行累积成 draft"""
+    for chunk in get_llm().stream(build_generate_prompt(state)):
+        if chunk.content:
+            yield chunk.content
 
 
 @timed("compliance")
@@ -130,6 +173,6 @@ agent_app = build_graph()
 if __name__ == "__main__":
     for q in ["二甲双胍哪些人不能用？", "感冒吃什么药好？"]:
         print(f"\n问题：{q}")
-        result = agent_app.invoke({"question": q})
+        result = agent_app.invoke({"question": q, "history": []})
         print(f"回答前100字：{result['final_answer'][:100]}...")
         print(f"链路追踪：{result['trace']}")

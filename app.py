@@ -1,8 +1,11 @@
-"""Streamlit 前端：通过 HTTP 调用后端 API（前后端分离）"""
+"""Streamlit 前端：SSE token 级流式 + 多轮对话 + 反馈闭环"""
+import json
+import os
+
 import requests
 import streamlit as st
 
-API_BASE = "http://127.0.0.1:8000"
+API_BASE = os.getenv("API_BASE", "http://127.0.0.1:8000")
 TIMEOUT = 120
 
 st.set_page_config(page_title="医药文献合规问答助手", page_icon="💊", layout="wide")
@@ -10,16 +13,6 @@ st.set_page_config(page_title="医药文献合规问答助手", page_icon="💊"
 
 def api_get(path):
     return requests.get(f"{API_BASE}{path}", timeout=10)
-
-
-def api_ask(question: str) -> dict:
-    resp = requests.post(
-        f"{API_BASE}/ask",
-        json={"question": question},
-        timeout=TIMEOUT,
-    )
-    resp.raise_for_status()
-    return resp.json()
 
 
 def send_feedback(msg: dict, rating: str):
@@ -39,13 +32,62 @@ def send_feedback(msg: dict, rating: str):
         pass
 
 
+def build_history():
+    """提取真实问答轮次（跳过欢迎语），构造 API history 格式"""
+    hist = []
+    for m in st.session_state.messages:
+        if m["role"] == "user":
+            hist.append({"role": "user", "content": m["content"]})
+        elif m["role"] == "assistant" and m.get("request_id"):
+            hist.append({"role": "assistant", "content": m["content"][:300]})
+    return hist[-8:]
+
+
 def parse_answer(final_answer: str):
-    """拆分后端返回：正文 / 引用来源 / 审查警告"""
+    """拆分后端完整回答：正文 / 引用来源 / 审查警告"""
     parts = final_answer.split("【引用来源】")
     answer = parts[0].strip()
     sources = parts[1].split("【审查警告】")[0].strip() if len(parts) > 1 else ""
     warning = final_answer.split("【审查警告】")[1].strip() if "【审查警告】" in final_answer else ""
     return answer, sources, warning
+
+
+def stream_ask(question: str, history: list, status_box=None):
+    """SSE 流式问答：返回 (文本流生成器, 元信息可变字典)"""
+    meta = {"request_id": "", "trace": [], "final": "", "cached": None, "sources_hit": []}
+
+    def gen():
+        with requests.post(
+            f"{API_BASE}/ask_stream",
+            json={"question": question, "history": history},
+            stream=True,
+            timeout=TIMEOUT,
+        ) as resp:
+            resp.raise_for_status()
+            for raw in resp.iter_lines(decode_unicode=True):
+                if not raw or not raw.startswith("data: "):
+                    continue
+                data = json.loads(raw[6:])
+                if "chunk" in data:
+                    yield data["chunk"]
+                elif "search_query" in data:
+                    meta["request_id"] = data.get("request_id", "")
+                    if status_box:
+                        status_box.caption(f"🔍 查询改写：{data['search_query']}")
+                elif "count" in data and "sources" in data:
+                    meta["sources_hit"] = data.get("sources", [])
+                    if status_box:
+                        status_box.caption(f"📚 检索完成：命中 {data['count']} 条资料")
+                elif "final_answer" in data:
+                    meta["final"] = data["final_answer"]
+                elif "trace" in data:
+                    meta["request_id"] = data.get("request_id", meta["request_id"])
+                    meta["trace"] = data.get("trace", [])
+                    meta["cached"] = data.get("cached")
+                elif "detail" in data:
+                    yield f"\n\n❌ 请求失败：{data['detail']}"
+
+    return gen(), meta
 
 
 # ===== 后端连通性检查 =====
@@ -119,27 +161,32 @@ if not question and st.session_state.get("pending"):
     st.session_state.pending = None
 
 if question:
+    history = build_history()
     st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
         st.markdown(question)
 
     with st.chat_message("assistant"):
-        with st.spinner("Agent 执行中：缓存 → 改写 → 检索 → 生成 → 合规审查..."):
-            try:
-                resp = api_ask(question)
-                final_text = resp.get("answer", "")
-                rid = resp.get("request_id", "")
-            except Exception as e:
-                final_text = f"请求失败：{e}"
-                rid = ""
+        status_box = st.empty()
+        try:
+            gen, meta = stream_ask(question, history, status_box)
+            raw = st.write_stream(gen)
+        except Exception as e:
+            raw = f"请求失败：{e}"
+            meta = {"request_id": "", "trace": [], "final": "", "cached": None, "sources_hit": []}
+        status_box.empty()
 
-        answer, sources, warning = parse_answer(final_text)
-        st.markdown(answer)
+        answer, sources, warning = parse_answer(meta.get("final") or (raw or ""))
+        if meta.get("cached"):
+            st.caption(f"⚡ 缓存命中：{meta['cached']}")
         if sources:
             with st.expander("📚 引用来源"):
                 st.markdown(sources.replace("\n", "\n\n"))
         if warning:
             st.warning(f"⚠️ 审查警告：{warning}")
+        if meta.get("trace"):
+            with st.expander("🔍 链路追踪"):
+                st.code(" → ".join(meta["trace"]))
 
     st.session_state.messages.append(
         {
@@ -147,7 +194,7 @@ if question:
             "content": answer,
             "sources": sources,
             "warning": warning,
-            "request_id": rid,
+            "request_id": meta.get("request_id", ""),
             "question": question,
             "feedback": None,
         }

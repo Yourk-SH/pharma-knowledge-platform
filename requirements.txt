@@ -15,3 +15,7 @@ streamlit
 pymupdf
 python-dotenv
 pytest
+pymysql
+redis
+loguru
+requests
