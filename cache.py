@@ -11,6 +11,7 @@ from logger import logger
 from retrieval import cosine_similarity_np
 
 FAQ_VECTOR_PATH = config.DATA_DIR / "faq_vectors.npy"
+FAQ_VECTOR_KEY_PATH = config.DATA_DIR / "faq_vectors.key"
 
 DISCLAIMER = "\n\n⚠️ 合规提示：本内容由AI基于文献生成，仅供专业人士参考，不构成用药建议。"
 
@@ -123,10 +124,14 @@ class FAQStore:
             return list(FAQ_SEED)
 
     def _ensure_vectors(self):
+        # 指纹校验：问题列表变了（改/删/换序）就重建，防止旧向量配新答案
+        fingerprint = hashlib.md5(
+            "|".join(f["question"] for f in self.faq).encode("utf-8")
+        ).hexdigest()
         need_build = True
-        if FAQ_VECTOR_PATH.exists():
-            vecs = np.load(FAQ_VECTOR_PATH)
-            if len(vecs) == len(self.faq):
+        if FAQ_VECTOR_PATH.exists() and FAQ_VECTOR_KEY_PATH.exists():
+            saved = FAQ_VECTOR_KEY_PATH.read_text(encoding="utf-8").strip()
+            if saved == fingerprint and len(np.load(FAQ_VECTOR_PATH)) == len(self.faq):
                 need_build = False
         if need_build:
             vecs = np.array(
@@ -134,6 +139,7 @@ class FAQStore:
                 dtype=np.float32,
             )
             np.save(FAQ_VECTOR_PATH, vecs)
+            FAQ_VECTOR_KEY_PATH.write_text(fingerprint, encoding="utf-8")
         return np.load(FAQ_VECTOR_PATH)
 
     def match(self, query: str):

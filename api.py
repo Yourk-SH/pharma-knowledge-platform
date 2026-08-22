@@ -20,7 +20,6 @@ from agents import (
     route_after_retrieve,
     stream_generate,
 )
-from cache import cache_lookup, cache_writeback
 from config import BASE_DIR
 from knowledge import load_index
 from logger import logger, set_request_id
