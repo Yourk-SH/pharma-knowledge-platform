@@ -8,7 +8,7 @@ services:
     build: .
     command: python api.py
     ports:
-      - "8000:8000"
+      - "8001:8000"
     env_file: .env
     environment:
       - HOST=0.0.0.0
@@ -25,7 +25,7 @@ services:
     build: .
     command: streamlit run app.py --server.address=0.0.0.0 --server.port=8501
     ports:
-      - "8501:8501"
+      - "8502:8501"
     environment:
       - API_BASE=http://api:8000
       - TZ=Asia/Shanghai
